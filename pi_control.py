@@ -17,7 +17,7 @@ from py_arduino import PyArduino
 
 camera_index = 1
 
-model_path = "20251223nano.pt"
+model_path = "sensing(YOLO)_model.pt"
 
 liquid_class_id = 0
 tank_class_id = 1
