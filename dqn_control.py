@@ -32,8 +32,8 @@ from dqn_training import (
 
 # Configuration
 camera_index = 1
-model_path = "20251223nano.pt"
-dqn_model_path = "dqn_liquid_level_model.pth"
+model_path = "sensing(YOLO)_model.pt"
+dqn_model_path = "dqn_liquidleveling_model.pth"
 
 liquid_class_id = 0
 tank_class_id = 1
