@@ -426,7 +426,7 @@ def train() -> None:
             )
 
     print("=== Training Completed ===")
-    agent.save("dqn_liquid_level_model.pth")
+    agent.save("dqn_liquidleveling_model.pth")
     plot_training_results(episode_rewards, losses)
 
 
