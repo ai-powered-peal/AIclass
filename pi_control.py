@@ -434,7 +434,7 @@ class LiquidLevelDetector:
     def detect(self, frame):
         """Find the highest-confidence tank and liquid detections."""
         inference_start_time = time.perf_counter()
-        results = self.model(frame, conf=0.9, verbose=False)[0]
+        results = self.model(frame, conf=0.7, verbose=False)[0]
         inference_time_ms = (
             time.perf_counter() - inference_start_time
         ) * 1000.0
