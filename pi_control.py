@@ -43,7 +43,9 @@ control_period_s = 3.0
 max_pump_speed = 20
 min_pump_speed = 0
 
-
+# ==========================================================
+# Utility
+# ==========================================================
 def clamp(value, lower, upper):
     """Clamp ``value`` into the closed interval ``[lower, upper]``.
 
@@ -62,7 +64,9 @@ def clamp(value, lower, upper):
     else:
         return value
 
-
+# ==========================================================
+# Controller
+# ==========================================================
 class PIController:
     """Discrete PI controller with feed-forward and clamping anti-windup.
 
@@ -150,7 +154,9 @@ class PIController:
         """
         self.integral_error = 0.0
 
-
+# ==========================================================
+# Hardware
+# ==========================================================
 class PumpController:
     """Inlet pump plus inlet/outlet valve driver.
 
@@ -207,7 +213,9 @@ class PumpController:
         self.set_pump_speed(0)
         self.close_all_valves()
 
-
+# ==========================================================
+# Control loop
+# ==========================================================
 def control_thread_fn(
     shared: SharedLevel,
     pump: PumpController,
@@ -285,7 +293,9 @@ def control_thread_fn(
     finally:
         pump.shutdown()
 
-
+# ==========================================================
+# Sensing
+# ==========================================================
 class LiquidLevelDetector:
     """YOLO-based detector for tank and liquid level estimation.
 
@@ -518,7 +528,9 @@ def sensing_thread_fn(
         if show_display:
             cv2.destroyAllWindows()
 
-
+# ==========================================================
+# Shared data
+# ==========================================================
 class SharedLevel:
     """Thread-safe carrier for the most recent liquid-height reading.
 
@@ -606,7 +618,9 @@ class SharedLog:
                 self.error_i[:],
             )
 
-
+# ==========================================================
+# Visualization
+# ==========================================================
 def plot_results(log: SharedLog):
     """Show matplotlib plots for level, pump speed, and integral term.
 
@@ -652,7 +666,9 @@ def plot_results(log: SharedLog):
 
     plt.show()
 
-
+# ==========================================================
+# Main
+# ==========================================================
 def main():
     """Start the sensing and control threads and plot the final run."""
     shared = SharedLevel()
