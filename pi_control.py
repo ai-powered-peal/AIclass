@@ -63,140 +63,6 @@ def clamp(value, lower, upper):
         return value
 
 
-class SharedLevel:
-    """Thread-safe carrier for the most recent liquid-height reading.
-
-    Published by the sensing thread and consumed by the control thread.
-    Includes a validity flag and timestamp so the consumer can detect
-    stale data and fail safe.
-    """
-
-    def __init__(self):
-        """Initialise empty state with the lock ready to use."""
-        self.lock = threading.Lock()
-        self.liquid_height_cm = None
-        self.timestamp = 0.0
-        self.valid = False
-
-    def update(self, liquid_height_cm):
-        """Publish the latest measurement.
-
-        Args:
-            liquid_height_cm: Estimated height in cm, or ``None`` if the
-                detector could not produce a reading this frame.
-        """
-        with self.lock:
-            self.liquid_height_cm = liquid_height_cm
-            self.timestamp = time.time()
-            self.valid = liquid_height_cm is not None
-
-    def get(self):
-        """Return the latest reading, its timestamp, and validity flag.
-
-        Returns:
-            Tuple ``(liquid_height_cm, timestamp, valid)``.
-        """
-        with self.lock:
-            return self.liquid_height_cm, self.timestamp, self.valid
-
-
-class SharedLog:
-    """Thread-safe accumulator used for the post-run matplotlib plots.
-
-    Stores parallel arrays rather than a list of dicts so that matplotlib
-    can consume them directly with no further reshaping.
-    """
-
-    def __init__(self):
-        """Initialise empty log buffers."""
-        self.lock = threading.Lock()
-        self.t = []
-        self.level = []
-        self.speed = []
-        self.setpoint = []
-        # Separate buffer for the integral term so we can sanity-check
-        # anti-windup behaviour after a run.
-        self.error_i = []
-
-    def add(self, t, level, speed, setpoint, error_i=0.0):
-        """Append one sample to the log.
-
-        Args:
-            t: Absolute timestamp (seconds since epoch).
-            level: Measured liquid height in cm, or ``None``.
-            speed: Pump speed command issued this tick.
-            setpoint: Target level in cm.
-            error_i: PI integral term recorded at this tick.
-        """
-        with self.lock:
-            self.t.append(t)
-            self.level.append(level)
-            self.speed.append(speed)
-            self.setpoint.append(setpoint)
-            self.error_i.append(error_i)
-
-    def snapshot(self):
-        """Return copies of the log buffers for plotting.
-
-        Returns:
-            Tuple ``(t, level, speed, setpoint, error_i)``.
-        """
-        with self.lock:
-            return (
-                self.t[:],
-                self.level[:],
-                self.speed[:],
-                self.setpoint[:],
-                self.error_i[:],
-            )
-
-
-def plot_results(log: SharedLog):
-    """Show matplotlib plots for level, pump speed, and integral term.
-
-    Args:
-        log: Finalised log buffer from the control run.
-    """
-    t, level, speed, sp, error_i = log.snapshot()
-    if len(t) < 2:
-        print("Not enough data to plot.")
-        return
-
-    t0 = t[0]
-    t_rel = [x - t0 for x in t]
-
-    # Drop frames where sensing failed so the level line is contiguous.
-    t_level = [tt for tt, lv in zip(t_rel, level) if lv is not None]
-    level_valid = [lv for lv in level if lv is not None]
-
-    plt.figure()
-    plt.plot(t_level, level_valid, label="Liquid level (cm)")
-    plt.axhline(setpoint_cm, linestyle="--", label="Setpoint (cm)")
-    plt.xlabel("Time (s)")
-    plt.ylabel("Level (cm)")
-    plt.title("Liquid level")
-    plt.grid(True)
-    plt.legend()
-
-    plt.figure()
-    plt.plot(t_rel, speed, label="Pump speed (%)")
-    plt.xlabel("Time (s)")
-    plt.ylabel("Pump speed (%)")
-    plt.title("Pump speed")
-    plt.grid(True)
-    plt.legend()
-
-    plt.figure()
-    plt.plot(t_rel, error_i, label="Integral error")
-    plt.xlabel("Time (s)")
-    plt.ylabel("Integral error")
-    plt.title("Integral error")
-    plt.grid(True)
-    plt.legend()
-
-    plt.show()
-
-
 class PIController:
     """Discrete PI controller with feed-forward and clamping anti-windup.
 
@@ -340,6 +206,84 @@ class PumpController:
         """Stop the pump and close all valves on exit."""
         self.set_pump_speed(0)
         self.close_all_valves()
+
+
+def control_thread_fn(
+    shared: SharedLevel,
+    pump: PumpController,
+    stop_event: threading.Event,
+    log: SharedLog,
+):
+    """Tick the PI controller and drive the pump until stopped.
+
+    Args:
+        shared: Source of the latest liquid-height reading.
+        pump: Pump and valve driver.
+        stop_event: Event used to cooperatively stop the thread.
+        log: Destination for per-tick samples used in the final plot.
+    """
+    pi_controller = PIController(
+        kp,
+        ki,
+        state_steady_speed,
+        max_pump_speed,
+        control_period_s,
+    )
+
+    # Stop the pump if the last reading is older than this.
+    stale_sec = 3.0
+
+    next_tick = time.time()
+
+    try:
+        while not stop_event.is_set():
+            now = time.time()
+            if now < next_tick:
+                time.sleep(min(0.05, next_tick - now))
+                continue
+
+            tick_start = time.time()
+
+            liquid_height_cm, ts, valid = shared.get()
+            age = time.time() - ts
+
+            is_stale = (
+                (not valid)
+                or (liquid_height_cm is None)
+                or (age > stale_sec)
+            )
+            if is_stale:
+                pump.set_pump_speed(0)
+                pi_controller.reset()
+                log.add(
+                    time.time(),
+                    liquid_height_cm,
+                    0,
+                    setpoint_cm,
+                    0.0,
+                )
+                next_tick = tick_start + control_period_s
+                continue
+
+            speed, integral_error = pi_controller.update(
+                setpoint_cm,
+                liquid_height_cm,
+            )
+
+            pump.set_pump_speed(speed)
+
+            log.add(
+                time.time(),
+                liquid_height_cm,
+                speed,
+                setpoint_cm,
+                integral_error,
+            )
+
+            next_tick = tick_start + control_period_s
+
+    finally:
+        pump.shutdown()
 
 
 class LiquidLevelDetector:
@@ -575,82 +519,138 @@ def sensing_thread_fn(
             cv2.destroyAllWindows()
 
 
-def control_thread_fn(
-    shared: SharedLevel,
-    pump: PumpController,
-    stop_event: threading.Event,
-    log: SharedLog,
-):
-    """Tick the PI controller and drive the pump until stopped.
+class SharedLevel:
+    """Thread-safe carrier for the most recent liquid-height reading.
+
+    Published by the sensing thread and consumed by the control thread.
+    Includes a validity flag and timestamp so the consumer can detect
+    stale data and fail safe.
+    """
+
+    def __init__(self):
+        """Initialise empty state with the lock ready to use."""
+        self.lock = threading.Lock()
+        self.liquid_height_cm = None
+        self.timestamp = 0.0
+        self.valid = False
+
+    def update(self, liquid_height_cm):
+        """Publish the latest measurement.
+
+        Args:
+            liquid_height_cm: Estimated height in cm, or ``None`` if the
+                detector could not produce a reading this frame.
+        """
+        with self.lock:
+            self.liquid_height_cm = liquid_height_cm
+            self.timestamp = time.time()
+            self.valid = liquid_height_cm is not None
+
+    def get(self):
+        """Return the latest reading, its timestamp, and validity flag.
+
+        Returns:
+            Tuple ``(liquid_height_cm, timestamp, valid)``.
+        """
+        with self.lock:
+            return self.liquid_height_cm, self.timestamp, self.valid
+
+
+class SharedLog:
+    """Thread-safe accumulator used for the post-run matplotlib plots.
+
+    Stores parallel arrays rather than a list of dicts so that matplotlib
+    can consume them directly with no further reshaping.
+    """
+
+    def __init__(self):
+        """Initialise empty log buffers."""
+        self.lock = threading.Lock()
+        self.t = []
+        self.level = []
+        self.speed = []
+        self.setpoint = []
+        # Separate buffer for the integral term so we can sanity-check
+        # anti-windup behaviour after a run.
+        self.error_i = []
+
+    def add(self, t, level, speed, setpoint, error_i=0.0):
+        """Append one sample to the log.
+
+        Args:
+            t: Absolute timestamp (seconds since epoch).
+            level: Measured liquid height in cm, or ``None``.
+            speed: Pump speed command issued this tick.
+            setpoint: Target level in cm.
+            error_i: PI integral term recorded at this tick.
+        """
+        with self.lock:
+            self.t.append(t)
+            self.level.append(level)
+            self.speed.append(speed)
+            self.setpoint.append(setpoint)
+            self.error_i.append(error_i)
+
+    def snapshot(self):
+        """Return copies of the log buffers for plotting.
+
+        Returns:
+            Tuple ``(t, level, speed, setpoint, error_i)``.
+        """
+        with self.lock:
+            return (
+                self.t[:],
+                self.level[:],
+                self.speed[:],
+                self.setpoint[:],
+                self.error_i[:],
+            )
+
+
+def plot_results(log: SharedLog):
+    """Show matplotlib plots for level, pump speed, and integral term.
 
     Args:
-        shared: Source of the latest liquid-height reading.
-        pump: Pump and valve driver.
-        stop_event: Event used to cooperatively stop the thread.
-        log: Destination for per-tick samples used in the final plot.
+        log: Finalised log buffer from the control run.
     """
-    pi_controller = PIController(
-        kp,
-        ki,
-        state_steady_speed,
-        max_pump_speed,
-        control_period_s,
-    )
+    t, level, speed, sp, error_i = log.snapshot()
+    if len(t) < 2:
+        print("Not enough data to plot.")
+        return
 
-    # Stop the pump if the last reading is older than this.
-    stale_sec = 3.0
+    t0 = t[0]
+    t_rel = [x - t0 for x in t]
 
-    next_tick = time.time()
+    # Drop frames where sensing failed so the level line is contiguous.
+    t_level = [tt for tt, lv in zip(t_rel, level) if lv is not None]
+    level_valid = [lv for lv in level if lv is not None]
 
-    try:
-        while not stop_event.is_set():
-            now = time.time()
-            if now < next_tick:
-                time.sleep(min(0.05, next_tick - now))
-                continue
+    plt.figure()
+    plt.plot(t_level, level_valid, label="Liquid level (cm)")
+    plt.axhline(setpoint_cm, linestyle="--", label="Setpoint (cm)")
+    plt.xlabel("Time (s)")
+    plt.ylabel("Level (cm)")
+    plt.title("Liquid level")
+    plt.grid(True)
+    plt.legend()
 
-            tick_start = time.time()
+    plt.figure()
+    plt.plot(t_rel, speed, label="Pump speed (%)")
+    plt.xlabel("Time (s)")
+    plt.ylabel("Pump speed (%)")
+    plt.title("Pump speed")
+    plt.grid(True)
+    plt.legend()
 
-            liquid_height_cm, ts, valid = shared.get()
-            age = time.time() - ts
+    plt.figure()
+    plt.plot(t_rel, error_i, label="Integral error")
+    plt.xlabel("Time (s)")
+    plt.ylabel("Integral error")
+    plt.title("Integral error")
+    plt.grid(True)
+    plt.legend()
 
-            is_stale = (
-                (not valid)
-                or (liquid_height_cm is None)
-                or (age > stale_sec)
-            )
-            if is_stale:
-                pump.set_pump_speed(0)
-                pi_controller.reset()
-                log.add(
-                    time.time(),
-                    liquid_height_cm,
-                    0,
-                    setpoint_cm,
-                    0.0,
-                )
-                next_tick = tick_start + control_period_s
-                continue
-
-            speed, integral_error = pi_controller.update(
-                setpoint_cm,
-                liquid_height_cm,
-            )
-
-            pump.set_pump_speed(speed)
-
-            log.add(
-                time.time(),
-                liquid_height_cm,
-                speed,
-                setpoint_cm,
-                integral_error,
-            )
-
-            next_tick = tick_start + control_period_s
-
-    finally:
-        pump.shutdown()
+    plt.show()
 
 
 def main():
