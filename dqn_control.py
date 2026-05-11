@@ -19,6 +19,7 @@ from ultralytics import YOLO
 from py_arduino import PyArduino
 
 # Ensure these match the values used during DQN_training
+import dqn_training
 from dqn_training import (
     DQNAgent,
     action_dims,
@@ -225,6 +226,12 @@ def sensing_thread_fn(
     shared: SharedLevel, stop_event: threading.Event
 ):
     """Capture frames and publish liquid-height estimates."""
+    # Arrow-key handler mutates the module-level setpoint live; GIL makes
+    # a single-float assignment atomic so no lock is needed here.
+    # DQN agent's build_state reads dqn_training.setpoint_cm directly,
+    # so that namespace must be updated alongside this local binding.
+    global setpoint_cm
+
     camera = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
 
     detector = LiquidLevelDetector(
@@ -301,15 +308,47 @@ def sensing_thread_fn(
                     2,
                 )
 
+            # Always show the current setpoint so the operator can see
+            # the effect of arrow-key adjustments in real time.
+            cv2.putText(
+                frame,
+                f"Setpoint: {setpoint_cm:.2f}cm  (Up/Down +/- 0.5)",
+                (30, 80),
+                cv2.FONT_ITALIC,
+                0.8,
+                (255, 255, 255),
+                2,
+            )
+
             shared.update(liquid_height_cm)
 
             if show_display:
                 cv2.imshow(window_name, frame)
-                key = cv2.waitKey(10)
+                # waitKeyEx returns the full platform key code so arrow
+                # keys can be distinguished from the masked ASCII range.
+                key = cv2.waitKeyEx(10)
 
                 if key & 0xFF == 27:
                     stop_event.set()
                     break
+
+                # Up / Down arrow nudges the setpoint by 0.5 cm and
+                # clamps it to the physical tank range. dqn_training's
+                # module attribute is updated too so the agent's
+                # build_state sees the new value. Both Windows and Linux
+                # key codes are accepted.
+                if key in (2490368, 65362):
+                    setpoint_cm = clamp(
+                        setpoint_cm + 0.5, 0.0, tank_height_cm,
+                    )
+                    dqn_training.setpoint_cm = setpoint_cm
+                    print(f"\nSetpoint -> {setpoint_cm:.2f} cm")
+                elif key in (2621440, 65364):
+                    setpoint_cm = clamp(
+                        setpoint_cm - 0.5, 0.0, tank_height_cm,
+                    )
+                    dqn_training.setpoint_cm = setpoint_cm
+                    print(f"\nSetpoint -> {setpoint_cm:.2f} cm")
 
                 window_closed = cv2.getWindowProperty(
                     window_name, cv2.WND_PROP_VISIBLE
@@ -431,8 +470,11 @@ def plot_results(log: SharedLog):
     ax1.plot(
         t_level, level_valid, linewidth=2, label="Liquid level"
     )
-    ax1.axhline(
-        setpoint_cm,
+    # Plot the logged per-tick setpoint so live adjustments appear as
+    # step changes rather than a single horizontal line.
+    ax1.plot(
+        t_rel,
+        sp,
         linestyle="--",
         color="r",
         linewidth=2,
