@@ -65,6 +65,96 @@ def clamp(value, lower, upper):
         return value
 
 # ==========================================================
+# Shared data
+# ==========================================================
+class SharedLevel:
+    """Thread-safe carrier for the most recent liquid-height reading.
+
+    Published by the sensing thread and consumed by the control thread.
+    Includes a validity flag and timestamp so the consumer can detect
+    stale data and fail safe.
+    """
+
+    def __init__(self):
+        """Initialise empty state with the lock ready to use."""
+        self.lock = threading.Lock()
+        self.liquid_height_cm = None
+        self.timestamp = 0.0
+        self.valid = False
+
+    def update(self, liquid_height_cm):
+        """Publish the latest measurement.
+
+        Args:
+            liquid_height_cm: Estimated height in cm, or ``None`` if the
+                detector could not produce a reading this frame.
+        """
+        with self.lock:
+            self.liquid_height_cm = liquid_height_cm
+            self.timestamp = time.time()
+            self.valid = liquid_height_cm is not None
+
+    def get(self):
+        """Return the latest reading, its timestamp, and validity flag.
+
+        Returns:
+            Tuple ``(liquid_height_cm, timestamp, valid)``.
+        """
+        with self.lock:
+            return self.liquid_height_cm, self.timestamp, self.valid
+
+
+class SharedLog:
+    """Thread-safe accumulator used for the post-run matplotlib plots.
+
+    Stores parallel arrays rather than a list of dicts so that matplotlib
+    can consume them directly with no further reshaping.
+    """
+
+    def __init__(self):
+        """Initialise empty log buffers."""
+        self.lock = threading.Lock()
+        self.t = []
+        self.level = []
+        self.speed = []
+        self.setpoint = []
+        # Separate buffer for the integral term so we can sanity-check
+        # anti-windup behaviour after a run.
+        self.error_i = []
+
+    def add(self, t, level, speed, setpoint, error_i=0.0):
+        """Append one sample to the log.
+
+        Args:
+            t: Absolute timestamp (seconds since epoch).
+            level: Measured liquid height in cm, or ``None``.
+            speed: Pump speed command issued this tick.
+            setpoint: Target level in cm.
+            error_i: PI integral term recorded at this tick.
+        """
+        with self.lock:
+            self.t.append(t)
+            self.level.append(level)
+            self.speed.append(speed)
+            self.setpoint.append(setpoint)
+            self.error_i.append(error_i)
+
+    def snapshot(self):
+        """Return copies of the log buffers for plotting.
+
+        Returns:
+            Tuple ``(t, level, speed, setpoint, error_i)``.
+        """
+        with self.lock:
+            return (
+                self.t[:],
+                self.level[:],
+                self.speed[:],
+                self.setpoint[:],
+                self.error_i[:],
+            )
+
+# ==========================================================
 # Controller
 # ==========================================================
 class PIController:
@@ -528,95 +618,6 @@ def sensing_thread_fn(
         if show_display:
             cv2.destroyAllWindows()
 
-# ==========================================================
-# Shared data
-# ==========================================================
-class SharedLevel:
-    """Thread-safe carrier for the most recent liquid-height reading.
-
-    Published by the sensing thread and consumed by the control thread.
-    Includes a validity flag and timestamp so the consumer can detect
-    stale data and fail safe.
-    """
-
-    def __init__(self):
-        """Initialise empty state with the lock ready to use."""
-        self.lock = threading.Lock()
-        self.liquid_height_cm = None
-        self.timestamp = 0.0
-        self.valid = False
-
-    def update(self, liquid_height_cm):
-        """Publish the latest measurement.
-
-        Args:
-            liquid_height_cm: Estimated height in cm, or ``None`` if the
-                detector could not produce a reading this frame.
-        """
-        with self.lock:
-            self.liquid_height_cm = liquid_height_cm
-            self.timestamp = time.time()
-            self.valid = liquid_height_cm is not None
-
-    def get(self):
-        """Return the latest reading, its timestamp, and validity flag.
-
-        Returns:
-            Tuple ``(liquid_height_cm, timestamp, valid)``.
-        """
-        with self.lock:
-            return self.liquid_height_cm, self.timestamp, self.valid
-
-
-class SharedLog:
-    """Thread-safe accumulator used for the post-run matplotlib plots.
-
-    Stores parallel arrays rather than a list of dicts so that matplotlib
-    can consume them directly with no further reshaping.
-    """
-
-    def __init__(self):
-        """Initialise empty log buffers."""
-        self.lock = threading.Lock()
-        self.t = []
-        self.level = []
-        self.speed = []
-        self.setpoint = []
-        # Separate buffer for the integral term so we can sanity-check
-        # anti-windup behaviour after a run.
-        self.error_i = []
-
-    def add(self, t, level, speed, setpoint, error_i=0.0):
-        """Append one sample to the log.
-
-        Args:
-            t: Absolute timestamp (seconds since epoch).
-            level: Measured liquid height in cm, or ``None``.
-            speed: Pump speed command issued this tick.
-            setpoint: Target level in cm.
-            error_i: PI integral term recorded at this tick.
-        """
-        with self.lock:
-            self.t.append(t)
-            self.level.append(level)
-            self.speed.append(speed)
-            self.setpoint.append(setpoint)
-            self.error_i.append(error_i)
-
-    def snapshot(self):
-        """Return copies of the log buffers for plotting.
-
-        Returns:
-            Tuple ``(t, level, speed, setpoint, error_i)``.
-        """
-        with self.lock:
-            return (
-                self.t[:],
-                self.level[:],
-                self.speed[:],
-                self.setpoint[:],
-                self.error_i[:],
-            )
 
 # ==========================================================
 # Visualization
