@@ -40,7 +40,7 @@ tank_class_id = 1
 show_display = True
 
 # DQN validation parameters
-epsilon = 0.05
+epsilon = 0.01
 
 
 def clamp(value: float, lower: float, upper: float) -> float:
@@ -177,7 +177,7 @@ class LiquidLevelDetector:
     def detect(self, frame):
         """Return the highest-confidence tank box and liquid line."""
         inference_start_time = time.perf_counter()
-        results = self.model(frame, conf=0.9, verbose=False)[0]
+        results = self.model(frame, conf=0.7, verbose=False)[0]
         inference_time_ms = (
             time.perf_counter() - inference_start_time
         ) * 1000.0
@@ -357,7 +357,7 @@ def control_thread_fn(
             is_stale = (not valid) or (h is None) or (age > stale_sec)
             if is_stale:
                 pump.set_pump_speed(0)
-                agent.u_prev = 0.0
+                agent.error_int = 0.0
                 log.add(
                     time.time(), h, 0, setpoint_cm, 0.0, -1, 0.0
                 )
@@ -377,10 +377,11 @@ def control_thread_fn(
 
             pump.set_pump_speed(u_cmd)
 
-            # Reward uses the same definition as training so the
-            # logged values are directly comparable.
-            reward = agent.compute_reward(h, float(u_cmd))
-            agent.u_prev = float(u_cmd)
+            # Mirror the training reward so logged values are directly
+            # comparable to the curves produced by DQN_training.
+            error = abs(h - setpoint_cm)
+            reward = -error / tank_height_cm
+
             agent.error_int = float(np.clip(
                 agent.error_int
                 + (setpoint_cm - h) * control_period_s,
