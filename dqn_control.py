@@ -464,8 +464,19 @@ def plot_results(log: SharedLog):
     level_valid = [lv for lv in level if lv is not None]
 
     fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(
-        2, 2, figsize=(14, 10)
+       2, 2,
+       figsize=(16, 9),
+      dpi=100
     )
+
+    plt.subplots_adjust(
+        left=0.07,
+        right=0.97,
+        top=0.92,
+        bottom=0.08,
+        hspace=0.32,
+        wspace=0.22
+)
 
     ax1.plot(
         t_level, level_valid, linewidth=2, label="Liquid level"
@@ -513,7 +524,6 @@ def plot_results(log: SharedLog):
     ax4.grid(True, alpha=0.3)
     ax4.legend()
 
-    plt.tight_layout()
     plt.show()
 
 
