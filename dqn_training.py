@@ -35,6 +35,7 @@ action_dims = num_actions
 learning_rate = 1e-4
 gamma = 0.99
 tau = 0.005
+hidden_dims = 128
 
 # Exploration
 epsilon_start = 1.0
@@ -89,20 +90,18 @@ class QNetwork(nn.Module):
     def __init__(self, input_dim: int, output_dim: int):
         super().__init__()
 
-        hidden_layer1 = 128
-        hidden_layer2 = 128
-
         self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden_layer1),
+            nn.Linear(input_dim, hidden_dims),
             nn.ReLU(),
-            nn.Linear(hidden_layer1, hidden_layer2),
+            nn.Linear(hidden_dims, hidden_dims),
             nn.ReLU(),
-            nn.Linear(hidden_layer2, output_dim),
+            nn.Linear(hidden_dims, output_dim),
         )
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
         """Forward pass to compute Q-values for all actions."""
         return self.net(state)
+
 
 # 4. Environment Simulator
 class WaterTankSimulator:
@@ -125,7 +124,6 @@ class WaterTankSimulator:
 
     def step_env(self, u: int) -> Tuple[float, float]:
         """Apply pump speed and return level plus reward."""
-        
         u = int(np.clip(u, min_pump_speed, max_pump_speed))
 
         process_noise = float(
@@ -150,7 +148,7 @@ class WaterTankSimulator:
         error = abs(h_measured - setpoint_cm)
         
         # Normalized tracking reward
-        reward = - error / tank_height_cm
+        reward = -error / tank_height_cm
 
         return h_measured, reward
 
@@ -223,7 +221,6 @@ class DQNAgent:
             ).unsqueeze(0)
             q_values = self.q_net(state_tensor)
             return int(q_values.argmax(dim=1).item())
-
 
     def train_step(self) -> Optional[float]:
         """Perform a single step of mini-batch gradient descent."""
@@ -400,8 +397,7 @@ def train() -> None:
             if loss is not None:
                 ep_losses.append(loss)
 
-            if step % 5 == 0:
-                agent.update_target()
+            agent.update_target()
 
             h = h_next
             ep_reward += reward
