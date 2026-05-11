@@ -1,13 +1,12 @@
 """DQN Training module for Water Tank Liquid Level Control.
 
 This script trains a Deep Q-Network to control a simulated water pump,
-aiming to maintain a target liquid level while minimizing abrupt changes
-in pump speed (chattering).
+aiming to maintain the target liquid level.
 """
 
 import collections
 import random
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -28,23 +27,26 @@ min_pump_speed = 0
 max_pump_speed = 20
 num_actions = max_pump_speed - min_pump_speed + 1
 
-# Dimensions
+# DQN Dimensions
 state_dims = 3   # [h_norm, error_norm, error_int_norm]
 action_dims = num_actions
 
-# Hyperparameters
+# Training Hyperparameters
 learning_rate = 1e-4
 gamma = 0.99
 tau = 0.005
 
+# Exploration
 epsilon_start = 1.0
 epsilon_end = 0.05
-epsilon_decay = 0.995
+epsilon_decay = 0.998
 
+# Replay Buffer
 buffer_size = 10000
 batch_size = 64
 min_buffer_size = 1000
 
+# Training Loop
 max_steps_per_episode = 100
 num_episodes = 1000
 
@@ -102,8 +104,58 @@ class QNetwork(nn.Module):
         """Forward pass to compute Q-values for all actions."""
         return self.net(state)
 
+# 4. Environment Simulator
+class WaterTankSimulator:
+    """First-order difference-equation model of the water tank."""
 
-# 4. Agent
+    def __init__(self):
+        # h(k+1) = a*h(k) + b*u(k) + c
+        self.a = 0.95
+        self.b = 0.05
+        self.c = -0.3
+        self.h = setpoint_cm
+
+        self.process_noise_std = 0.05
+        self.measure_noise_std = 0.02
+
+    def reset(self) -> float:
+        """Reset the tank to a random initial liquid level."""
+        self.h = float(np.random.uniform(2.0, 5.0))
+        return self.h
+
+    def step_env(self, u: int) -> Tuple[float, float]:
+        """Apply pump speed and return level plus reward."""
+        
+        u = int(np.clip(u, min_pump_speed, max_pump_speed))
+
+        process_noise = float(
+            np.random.normal(0, self.process_noise_std)
+        )
+        self.h = (
+            self.a * self.h + self.b * u + self.c + process_noise
+        )
+        self.h = float(np.clip(self.h, 0.0, tank_height_cm))
+
+        measure_noise = float(
+            np.random.normal(0, self.measure_noise_std)
+        )
+        h_measured = self.h + measure_noise
+        h_measured = float(np.clip(
+            h_measured,
+            0.0,
+            tank_height_cm,
+        ))
+
+        # Reward calculation
+        error = abs(h_measured - setpoint_cm)
+        
+        # Normalized tracking reward
+        reward = - error / tank_height_cm
+
+        return h_measured, reward
+
+
+# 5. Agent
 class DQNAgent:
     """Deep Q-Network agent for pump speed control."""
 
@@ -126,7 +178,6 @@ class DQNAgent:
 
         # These track control history across steps and feed the reward
         # signal; they are not part of the observation vector.
-        self.u_prev = float((min_pump_speed + max_pump_speed) // 2)
         self.error_int = 0.0
 
         self.training_losses: List[float] = []
@@ -141,7 +192,6 @@ class DQNAgent:
 
     def reset_episode(self) -> None:
         """Reset internal tracking variables at the start of an episode."""
-        self.u_prev = float((min_pump_speed + max_pump_speed) // 2)
         self.error_int = 0.0
 
     def build_state(self, h: float) -> np.ndarray:
@@ -174,19 +224,6 @@ class DQNAgent:
             q_values = self.q_net(state_tensor)
             return int(q_values.argmax(dim=1).item())
 
-    def compute_reward(self, h: float, u: float) -> float:
-        """Return reward R = -|error| - 0.05 * |delta_u|.
-
-        The smoothness term is essential to suppress pump chattering;
-        without it the policy oscillates between adjacent speeds.
-        """
-        error = abs(h - setpoint_cm)
-        tracking_penalty = -error
-
-        delta_u = abs(u - self.u_prev)
-        smoothness_penalty = -0.05 * delta_u
-
-        return float(tracking_penalty + smoothness_penalty)
 
     def train_step(self) -> Optional[float]:
         """Perform a single step of mini-batch gradient descent."""
@@ -286,44 +323,6 @@ class DQNAgent:
         )
 
 
-# 5. Environment Simulator
-class WaterTankSimulator:
-    """First-order difference-equation model of the water tank."""
-
-    def __init__(self):
-        # h(k+1) = a*h(k) + b*u(k) + c
-        self.a = 0.95
-        self.b = 0.05
-        self.c = -0.3
-        self.h = setpoint_cm
-
-        self.process_noise_std = 0.05
-        self.measure_noise_std = 0.02
-
-    def reset(self) -> float:
-        """Reset the tank to a random initial liquid level."""
-        self.h = float(np.random.uniform(2.0, 5.0))
-        return self.h
-
-    def step_env(self, u: int) -> float:
-        """Apply pump speed and return the newly measured level."""
-        u = int(np.clip(u, min_pump_speed, max_pump_speed))
-
-        process_noise = float(
-            np.random.normal(0, self.process_noise_std)
-        )
-        self.h = (
-            self.a * self.h + self.b * u + self.c + process_noise
-        )
-        self.h = float(np.clip(self.h, 0.0, tank_height_cm))
-
-        measure_noise = float(
-            np.random.normal(0, self.measure_noise_std)
-        )
-        h_measured = self.h + measure_noise
-        return float(np.clip(h_measured, 0.0, tank_height_cm))
-
-
 # 6. Training Routine
 def plot_training_results(
     rewards: List[float], losses: List[float]
@@ -379,17 +378,14 @@ def train() -> None:
         ep_reward = 0.0
         ep_losses = []
 
-        for _ in range(max_steps_per_episode):
+        for step in range(max_steps_per_episode):
             state = agent.build_state(h)
 
             action = agent.select_action(state, training=True)
             u = agent.action_to_u(action)
 
-            h_next = env.step_env(u)
+            h_next, reward = env.step_env(u)
 
-            reward = agent.compute_reward(h_next, u)
-
-            agent.u_prev = float(u)
             agent.error_int = float(np.clip(
                 agent.error_int
                 + (setpoint_cm - h_next) * control_period_s,
@@ -404,7 +400,8 @@ def train() -> None:
             if loss is not None:
                 ep_losses.append(loss)
 
-            agent.update_target()
+            if step % 5 == 0:
+                agent.update_target()
 
             h = h_next
             ep_reward += reward
