@@ -494,6 +494,10 @@ def sensing_thread_fn(
             also sets this event on fatal errors so the control thread
             can shut down safely.
     """
+    # Arrow-key handler mutates the module-level setpoint live; GIL makes
+    # a single-float assignment atomic so no lock is needed here.
+    global setpoint_cm
+
     camera = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
 
     detector = LiquidLevelDetector(
@@ -571,17 +575,45 @@ def sensing_thread_fn(
                     2,
                 )
 
+            # Always show the current setpoint so the operator can see
+            # the effect of arrow-key adjustments in real time.
+            cv2.putText(
+                frame,
+                f"Setpoint: {setpoint_cm:.2f}cm  (Up/Down +/- 0.5)",
+                (30, 80),
+                cv2.FONT_ITALIC,
+                0.8,
+                (255, 255, 255),
+                2,
+            )
+
             shared.update(liquid_height_cm)
 
             if show_display:
                 cv2.imshow(window_name, frame)
-                key = cv2.waitKey(10)
+                # waitKeyEx returns the full platform key code so arrow
+                # keys can be distinguished from the masked ASCII range.
+                key = cv2.waitKeyEx(10)
 
                 # ESC closes the window and stops the run.
                 if key & 0xFF == 27:
                     print("\nShutting down")
                     stop_event.set()
                     break
+
+                # Up / Down arrow nudges the setpoint by 0.5 cm and
+                # clamps it to the physical tank range. Both Windows
+                # and Linux key codes are accepted.
+                if key in (2490368, 65362):
+                    setpoint_cm = clamp(
+                        setpoint_cm + 0.5, 0.0, tank_height_cm,
+                    )
+                    print(f"\nSetpoint -> {setpoint_cm:.2f} cm")
+                elif key in (2621440, 65364):
+                    setpoint_cm = clamp(
+                        setpoint_cm - 0.5, 0.0, tank_height_cm,
+                    )
+                    print(f"\nSetpoint -> {setpoint_cm:.2f} cm")
 
                 # Manually closing the window also stops the run.
                 visible = cv2.getWindowProperty(
@@ -642,7 +674,9 @@ def plot_results(log: SharedLog):
 
     plt.figure()
     plt.plot(t_level, level_valid, label="Liquid level (cm)")
-    plt.axhline(setpoint_cm, linestyle="--", label="Setpoint (cm)")
+    # Plot the logged per-tick setpoint so live adjustments appear as
+    # step changes rather than a single horizontal line.
+    plt.plot(t_rel, sp, linestyle="--", label="Setpoint (cm)")
     plt.xlabel("Time (s)")
     plt.ylabel("Level (cm)")
     plt.title("Liquid level")
