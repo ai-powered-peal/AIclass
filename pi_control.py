@@ -32,7 +32,7 @@ kp = 4.0
 ki = 0.005
 
 # Feed-forward steady-state pump speed that holds the setpoint.
-state_steady_speed = 10
+steady_state_speed = 10
 
 level_tolerance_cm = 0.05
 
@@ -121,8 +121,9 @@ class SharedLog:
         # Separate buffer for the integral term so we can sanity-check
         # anti-windup behaviour after a run.
         self.error_i = []
+        self.error = []
 
-    def add(self, t, level, speed, setpoint, error_i=0.0):
+    def add(self, t, level, speed, setpoint, error_i=0.0, error=0.0):
         """Append one sample to the log.
 
         Args:
@@ -138,6 +139,7 @@ class SharedLog:
             self.speed.append(speed)
             self.setpoint.append(setpoint)
             self.error_i.append(error_i)
+            self.error.append(error)
 
     def snapshot(self):
         """Return copies of the log buffers for plotting.
@@ -152,6 +154,7 @@ class SharedLog:
                 self.speed[:],
                 self.setpoint[:],
                 self.error_i[:],
+                self.error[:],
             )
 
 # ==========================================================
@@ -323,7 +326,7 @@ def control_thread_fn(
     pi_controller = PIController(
         kp,
         ki,
-        state_steady_speed,
+        steady_state_speed,
         max_pump_speed,
         control_period_s,
     )
@@ -359,6 +362,7 @@ def control_thread_fn(
                     0,
                     setpoint_cm,
                     0.0,
+                    0.0,
                 )
                 next_tick = tick_start + control_period_s
                 continue
@@ -368,6 +372,7 @@ def control_thread_fn(
                 liquid_height_cm,
             )
 
+            error = setpoint_cm - liquid_height_cm
             pump.set_pump_speed(speed)
 
             log.add(
@@ -376,6 +381,7 @@ def control_thread_fn(
                 speed,
                 setpoint_cm,
                 integral_error,
+                error,
             )
 
             next_tick = tick_start + control_period_s
@@ -655,12 +661,10 @@ def sensing_thread_fn(
 # Visualization
 # ==========================================================
 def plot_results(log: SharedLog):
-    """Show matplotlib plots for level, pump speed, and integral term.
+    """Show matplotlib plots in a single window."""
 
-    Args:
-        log: Finalised log buffer from the control run.
-    """
-    t, level, speed, sp, error_i = log.snapshot()
+    t, level, speed, sp, error_i, error = log.snapshot()
+
     if len(t) < 2:
         print("Not enough data to plot.")
         return
@@ -668,36 +672,110 @@ def plot_results(log: SharedLog):
     t0 = t[0]
     t_rel = [x - t0 for x in t]
 
-    # Drop frames where sensing failed so the level line is contiguous.
     t_level = [tt for tt, lv in zip(t_rel, level) if lv is not None]
     level_valid = [lv for lv in level if lv is not None]
 
-    plt.figure()
-    plt.plot(t_level, level_valid, label="Liquid level (cm)")
-    # Plot the logged per-tick setpoint so live adjustments appear as
-    # step changes rather than a single horizontal line.
-    plt.plot(t_rel, sp, linestyle="--", label="Setpoint (cm)")
-    plt.xlabel("Time (s)")
-    plt.ylabel("Level (cm)")
-    plt.title("Liquid level")
-    plt.grid(True)
-    plt.legend()
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(
+        2,
+        2,
+        figsize=(16, 9),
+        dpi=100
+    )
 
-    plt.figure()
-    plt.plot(t_rel, speed, label="Pump speed (%)")
-    plt.xlabel("Time (s)")
-    plt.ylabel("Pump speed (%)")
-    plt.title("Pump speed")
-    plt.grid(True)
-    plt.legend()
+    # =====================================================
+    # Liquid Level
+    # =====================================================
+    ax1.plot(
+        t_level,
+        level_valid,
+        linewidth=2,
+        label="Liquid level"
+    )
 
-    plt.figure()
-    plt.plot(t_rel, error_i, label="Integral error")
-    plt.xlabel("Time (s)")
-    plt.ylabel("Integral error")
-    plt.title("Integral error")
-    plt.grid(True)
-    plt.legend()
+    ax1.plot(
+        t_rel,
+        sp,
+        linestyle="--",
+        linewidth=2,
+        color="red",
+        label="Setpoint"
+    )
+
+    ax1.set_xlabel("Time (s)")
+    ax1.set_ylabel("Level (cm)")
+    ax1.set_title("Liquid Level")
+    ax1.grid(True, alpha=0.3)
+    ax1.legend()
+
+    # =====================================================
+    # Pump Speed
+    # =====================================================
+    ax2.plot(
+        t_rel,
+        speed,
+        linewidth=2,
+        color="orange",
+        label="Pump speed"
+    )
+
+    ax2.set_xlabel("Time (s)")
+    ax2.set_ylabel("Speed")
+    ax2.set_title("Pump Speed")
+    ax2.grid(True, alpha=0.3)
+    ax2.legend()
+
+    # =====================================================
+    # Tracking Error
+    # =====================================================
+    ax3.plot(
+        t_rel,
+        error,
+        linewidth=2,
+        color="blue",
+        label="Tracking error"
+    )
+
+    ax3.axhline(
+        0,
+        linestyle="--",
+        color="black",
+        linewidth=1
+    )
+
+    ax3.set_xlabel("Time (s)")
+    ax3.set_ylabel("Error (cm)")
+    ax3.set_title("Tracking Error")
+    ax3.grid(True, alpha=0.3)
+    ax3.legend()
+
+    # =====================================================
+    # Integral Error
+    # =====================================================
+    ax4.plot(
+        t_rel,
+        error_i,
+        linewidth=2,
+        color="green",
+        label="Integral error"
+    )
+
+    ax4.set_xlabel("Time (s)")
+    ax4.set_ylabel("Integral")
+    ax4.set_title("Integral Error")
+    ax4.grid(True, alpha=0.3)
+    ax4.legend()
+
+    # =====================================================
+    # Layout
+    # =====================================================
+    plt.subplots_adjust(
+        left=0.07,
+        right=0.97,
+        top=0.93,
+        bottom=0.08,
+        hspace=0.32,
+        wspace=0.22
+    )
 
     plt.show()
 
